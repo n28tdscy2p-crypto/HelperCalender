@@ -1,9 +1,22 @@
 <!DOCTYPE html>
 <!--
-  阿姨工时管理 · 单文件网页（Supabase 云端版 v6 · 内置连接配置，打开即用）
+  阿姨工时管理 · 单文件网页（Supabase 云端版 v7 · 内置连接 + 登录锁）
 
   【数据存储】数据保存在 Supabase 云数据库，多设备/多浏览器自动同步。
-  连接配置已内置在源码中（SB_URL / SB_KEY），打开网页自动连接，无需任何手动设置。
+  连接配置已内置在源码中（SB_URL / SB_KEY）；打开网页需登录家庭账号（Supabase Auth），
+  登录状态保存在本机，之后打开无需再登录。
+
+  【安全】数据库 RLS 策略为「仅登录用户可读写」：anon key 即使被陌生人拿到，
+  未登录也无法读写任何数据。首次设置步骤：
+  1. Supabase 后台 Authentication → Users → Add user，填家庭邮箱+密码，勾 Auto Confirm
+  2. Authentication → Sign In / Providers → Email，关闭「Allow new users to sign up」
+  3. SQL Editor 执行下面的【RLS 策略 SQL】
+
+  【RLS 策略 SQL】
+  drop policy if exists "allow_all" on ayi_records;
+  drop policy if exists "allow_all" on ayi_holidays;
+  create policy "auth_only" on ayi_records for all to authenticated using (true) with check (true);
+  create policy "auth_only" on ayi_holidays for all to authenticated using (true) with check (true);
 
   【Supabase 建库步骤】（本项目已完成，仅留档备查）
   1. 打开 https://supabase.com 注册（GitHub 或邮箱，免费）
@@ -30,8 +43,8 @@
   create policy "allow_all" on ayi_records for all using (true) with check (true);
   create policy "allow_all" on ayi_holidays for all using (true) with check (true);
 
-  【注意】anon key 是公开密钥，allow_all 策略下任何拿到 URL+key 的人都能读写数据。
-  本文件部署在公开仓库时 key 对访客可见；家庭自用、数据不敏感，风险可接受。
+  【注意】anon key 是公开密钥，本文件部署在公开仓库时 key 对访客可见；
+  配合上方的 auth_only RLS 策略，未登录者即使拿到 key 也无法读写数据。
 
   【部署】单文件静态网页，可直接部署 GitHub Pages / Netlify / Cloudflare Pages。
 -->
@@ -142,8 +155,13 @@
   .act-btn.save { background:#1F4E79; color:#fff; }
   .act-btn.cancel { background:none; color:#999; font-weight:400; }
   .sheet textarea { width:100%; border:1px solid #E3E5E8; border-radius:10px; padding:10px; font-size:14px; font-family:inherit; resize:none; height:64px; margin-bottom:10px; }
-  .sheet input[type=text], .sheet input[type=date] { width:100%; border:1px solid #E3E5E8; border-radius:10px; padding:12px; font-size:14px; margin-bottom:10px; font-family:inherit; background:#fff; }
+  .sheet input[type=text], .sheet input[type=date], .sheet input[type=email], .sheet input[type=password] { width:100%; border:1px solid #E3E5E8; border-radius:10px; padding:12px; font-size:14px; margin-bottom:10px; font-family:inherit; background:#fff; }
   .sheet label { font-size:13px; color:#666; display:block; margin-bottom:4px; }
+
+  /* 登录页（未登录时全屏覆盖，不可关闭） */
+  .mask.login { align-items:center; justify-content:center; z-index:80; }
+  .mask.login .sheet { border-radius:18px; margin:0 14px; max-height:none; }
+  .mask.login .login-icon { text-align:center; font-size:40px; margin-bottom:6px; }
 
   #toast { position:fixed; left:50%; bottom:60px; transform:translateX(-50%); background:rgba(0,0,0,.75); color:#fff; font-size:13px; padding:10px 18px; border-radius:20px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:99; white-space:nowrap; max-width:88vw; overflow:hidden; text-overflow:ellipsis; }
   #toast.show { opacity:1; }
@@ -156,6 +174,7 @@
     <div class="btns">
       <button class="icon-btn" onclick="openHoli()" title="节假日管理">📅</button>
       <button class="icon-btn" onclick="openBackup()" title="备份与恢复">💾</button>
+      <button class="icon-btn" onclick="doLogout()" title="退出登录">🚪</button>
     </div>
   </header>
 
@@ -194,7 +213,7 @@
       <li>工作日全家外出 → 点那天记「外出休息」，阿姨欠 1 天补工。</li>
       <li>之后阿姨周日（或节假日）来补班 → 点那天记「补工」。</li>
       <li>顶部「补工结余」= 外出休息 − 已补工；&gt;0 阿姨还需补工，&lt;0 阿姨可多休。</li>
-      <li>数据保存在 Supabase 云端，打开网页自动连接，多设备实时同步；💾 可导出备份。</li>
+      <li>数据保存在 Supabase 云端，仅登录家庭账号后可读写，多设备实时同步；💾 可导出备份。</li>
     </ul>
   </details>
 
@@ -243,6 +262,20 @@
   </div>
 </div>
 
+<!-- 登录页（未登录时全屏覆盖，无关闭按钮） -->
+<div class="mask login show" id="loginMask">
+  <div class="sheet">
+    <div class="login-icon">🔒</div>
+    <h3 style="text-align:center">家庭登录</h3>
+    <div class="cur" style="text-align:center">输入家庭账号登录后使用。登录状态会保存在本机，之后打开无需再登录。</div>
+    <label>邮箱</label>
+    <input type="email" id="loginEmail" placeholder="家庭账号邮箱" autocomplete="username">
+    <label>密码</label>
+    <input type="password" id="loginPwd" placeholder="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="act-btn save" onclick="doLogin()">登 录</button>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -259,6 +292,8 @@ const WEEK = ['日','一','二','三','四','五','六'];
 
 /* ================== 初始化 ================== */
 let sb = null;              // Supabase 客户端
+let authed = false;         // 是否已登录
+let loggingIn = false;
 let records = {};           // 'YYYY-MM-DD' -> {type,note}
 let holidays = [];          // [{id,name,start_date,end_date}]
 let cur = new Date();
@@ -282,15 +317,52 @@ function addDay(ds){
 }
 function errMsg(e){ return (e && e.message) ? e.message : '网络错误'; }
 
-/* ================== Supabase 连接 ================== */
+/* ================== Supabase 连接与登录 ================== */
 async function initClient(){
   if (!SB_URL || !SB_KEY){
     sb = null; records = {}; holidays = [];
+    document.getElementById('loginMask').classList.remove('show');
     renderAll();
     return;
   }
   sb = supabase.createClient(SB_URL, SB_KEY);
-  await loadAll();
+  try {
+    const r = await sb.auth.getSession();
+    if (r && r.data && r.data.session){
+      authed = true;
+      document.getElementById('loginMask').classList.remove('show');
+      await loadAll();
+      return;
+    }
+  } catch(e){ /* 无有效会话则停留在登录页 */ }
+  authed = false;
+  renderAll();
+}
+
+async function doLogin(){
+  if (!sb || loggingIn) return;
+  const email = document.getElementById('loginEmail').value.trim();
+  const pwd = document.getElementById('loginPwd').value;
+  if (!email || !pwd){ toast('邮箱和密码都要填'); return; }
+  loggingIn = true;
+  try {
+    const r = await sb.auth.signInWithPassword({ email: email, password: pwd });
+    if (r.error) throw r.error;
+    authed = true;
+    document.getElementById('loginMask').classList.remove('show');
+    toast('登录成功');
+    await loadAll();
+  } catch(e){
+    toast('登录失败：' + errMsg(e));
+  }
+  loggingIn = false;
+}
+
+async function doLogout(){
+  if (!sb) return;
+  if (!confirm('退出登录？下次打开需要重新输入账号密码。')) return;
+  await sb.auth.signOut();
+  location.reload();
 }
 
 /* ================== 数据读写 ================== */
@@ -358,10 +430,10 @@ function renderBalance(){
   const card = document.getElementById('balanceCard');
   const num = document.getElementById('balanceNum');
   const desc = document.getElementById('balanceDesc');
-  if (!sb){
+  if (!sb || !authed){
     card.className = 'balance off';
-    num.textContent = '未连接';
-    desc.textContent = '连接配置缺失，请检查源码中的 SB_URL / SB_KEY。';
+    num.textContent = !sb ? '未连接' : '未登录';
+    desc.textContent = !sb ? '连接配置缺失，请检查源码中的 SB_URL / SB_KEY。' : '登录后显示数据。';
     document.getElementById('statRest').textContent = 0;
     document.getElementById('statMakeup').textContent = 0;
     document.getElementById('statHoli').textContent = 0;
@@ -464,8 +536,8 @@ function changeMonth(delta){
 }
 
 function needCfg(){
-  if (sb) return false;
-  toast('未连接 Supabase，请检查网络后刷新');
+  if (sb && authed) return false;
+  toast('请先登录');
   return true;
 }
 
