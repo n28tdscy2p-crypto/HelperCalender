@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<!--
+  阿姨工时管理 · 单文件网页（Supabase 云端版，可直接部署 Netlify）
+
+  【数据存储】数据保存在 Supabase 云数据库，多设备/多浏览器自动同步。
+  页面右上角 ⚙️ 填入项目 URL 和 anon key 即可连接（配置只保存在本机浏览器）。
+
+  【首次使用 · Supabase 建库步骤】
+  1. 打开 https://supabase.com 注册（GitHub 或邮箱，免费）
+  2. New Project：Name 随意（如 ayi-gongshi），Database Password 生成后保存好，
+     Region 选 Singapore（离国内最近）
+  3. 左侧 SQL Editor → New query，粘贴执行下面的【建表 SQL】
+  4. 左下齿轮 Project Settings → API，复制 Project URL 和 anon public key
+  5. 打开本网页 → 右上角 ⚙️ → 粘贴这两项 → 保存并连接
+
+  【建表 SQL】
+  create table ayi_records (
+    date text primary key,
+    type text not null,
+    note text default ''
+  );
+  create table ayi_holidays (
+    id text primary key,
+    name text not null,
+    start_date text not null,
+    end_date text not null
+  );
+  alter table ayi_records enable row level security;
+  alter table ayi_holidays enable row level security;
+  create policy "allow_all" on ayi_records for all using (true) with check (true);
+  create policy "allow_all" on ayi_holidays for all using (true) with check (true);
+
+  【注意】anon key 是公开密钥，allow_all 策略下任何拿到 URL+key 的人都能读写数据。
+  家庭自用风险可接受，但不要把 key 贴到公开仓库/论坛。
+
+  【部署】把本文件放进一个文件夹，拖到 https://app.netlify.com/drop 即可。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>阿姨工时管理</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif; background:#F5F6F8; color:#222; padding-bottom:40px; }
+  .wrap { max-width:560px; margin:0 auto; padding:14px 14px 0; }
+
+  header { display:flex; align-items:center; justify-content:space-between; padding:6px 2px 12px; }
+  header h1 { font-size:20px; font-weight:700; }
+  header h1 small { font-size:12px; color:#888; font-weight:400; margin-left:6px; }
+  header .btns { display:flex; gap:8px; }
+  .icon-btn { background:#fff; border:1px solid #E3E5E8; border-radius:10px; width:38px; height:38px; font-size:17px; cursor:pointer; }
+
+  .cfg-banner { background:#FFF6E9; border:1px solid #FFE1B3; border-radius:12px; padding:14px; font-size:13px; color:#8D6E00; margin-bottom:12px; line-height:1.7; display:none; }
+  .cfg-banner b { color:#B26A00; }
+  .cfg-banner a { color:#1E88E5; }
+
+  /* 结余横幅 */
+  .balance { border-radius:14px; padding:16px; color:#fff; margin-bottom:12px; box-shadow:0 2px 8px rgba(0,0,0,.08); }
+  .balance.owed  { background:linear-gradient(135deg,#E53935,#EF5350); }
+  .balance.clear { background:linear-gradient(135deg,#43A047,#66BB6A); }
+  .balance.extra { background:linear-gradient(135deg,#1E88E5,#42A5F5); }
+  .balance.off   { background:linear-gradient(135deg,#90A4AE,#B0BEC5); }
+  .balance .b-title { font-size:13px; opacity:.9; }
+  .balance .b-num { font-size:30px; font-weight:700; margin:2px 0; }
+  .balance .b-desc { font-size:13px; opacity:.95; }
+
+  /* 统计行 */
+  .stats { display:flex; gap:10px; margin-bottom:14px; }
+  .stat { flex:1; background:#fff; border-radius:12px; padding:12px 8px; text-align:center; border:1px solid #EBEDF0; }
+  .stat .n { font-size:22px; font-weight:700; }
+  .stat .t { font-size:12px; color:#888; margin-top:2px; }
+  .stat.red .n { color:#E53935; } .stat.green .n { color:#43A047; } .stat.orange .n { color:#B26A00; }
+
+  /* 日历 */
+  .card { background:#fff; border-radius:14px; border:1px solid #EBEDF0; padding:12px; margin-bottom:14px; }
+  .cal-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .cal-head .ym { font-size:16px; font-weight:600; }
+  .cal-head button { background:#F2F3F5; border:none; border-radius:8px; padding:6px 12px; font-size:14px; cursor:pointer; }
+  .cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+  .cal-grid .dow { text-align:center; font-size:11px; color:#999; padding:4px 0; }
+  .day { border-radius:10px; min-height:52px; padding:4px 2px; text-align:center; cursor:pointer; border:1px solid transparent; background:#FAFBFC; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; }
+  .day .dnum { font-size:14px; font-weight:600; line-height:1; }
+  .day .tag { font-size:9px; padding:1px 5px; border-radius:6px; line-height:1.4; white-space:nowrap; }
+  .day.empty { background:transparent; cursor:default; }
+  .day.prehire { background:transparent; color:#CCC; cursor:default; }
+  .day.prehire .tag { display:none; }
+  .day.work { background:#fff; border-color:#EBEDF0; }
+  .day.work .tag { color:#BBB; }
+  .day.sunday { background:#F2F3F5; color:#999; }
+  .day.sunday .tag { background:#E4E6E9; color:#888; }
+  .day.holiday { background:#FFF6E9; }
+  .day.holiday .tag { background:#FFE1B3; color:#B26A00; }
+  .day.extra_rest { background:#FFEDEE; }
+  .day.extra_rest .tag { background:#FFC9CC; color:#C62828; font-weight:600; }
+  .day.makeup_work { background:#EAF7EC; }
+  .day.makeup_work .tag { background:#C4E8CB; color:#2E7D32; font-weight:600; }
+  .day.today { border:2px solid #1F4E79; }
+  .day.has-note .dnum::after { content:"·"; color:#F57C00; font-weight:900; }
+  .month-sum { font-size:12px; color:#999; text-align:center; margin-top:8px; }
+
+  /* 历史记录 */
+  .hist-item { display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid #F2F3F5; }
+  .hist-item:last-child { border-bottom:none; }
+  .hist-badge { flex-shrink:0; font-size:11px; padding:3px 8px; border-radius:8px; font-weight:600; }
+  .hist-badge.extra_rest { background:#FFEDEE; color:#C62828; }
+  .hist-badge.makeup_work { background:#EAF7EC; color:#2E7D32; }
+  .hist-body { flex:1; min-width:0; }
+  .hist-date { font-size:14px; font-weight:600; }
+  .hist-note { font-size:12px; color:#999; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hist-del { background:none; border:none; color:#CCC; font-size:16px; cursor:pointer; padding:4px 8px; }
+  .hist-empty { text-align:center; color:#BBB; font-size:13px; padding:18px 0; }
+  .hist-more { width:100%; margin-top:8px; background:#F2F3F5; border:none; border-radius:8px; padding:8px; font-size:13px; color:#666; cursor:pointer; }
+
+  .sec-title { font-size:15px; font-weight:600; margin:2px 2px 10px; display:flex; justify-content:space-between; align-items:center; }
+  .sec-title button { background:#F2F3F5; border:none; border-radius:8px; padding:5px 10px; font-size:12px; color:#555; cursor:pointer; }
+
+  details.rules { background:#fff; border:1px solid #EBEDF0; border-radius:14px; padding:12px 14px; margin-bottom:14px; font-size:13px; color:#666; }
+  details.rules summary { font-weight:600; color:#333; cursor:pointer; font-size:14px; }
+  details.rules ul { margin:8px 0 0 18px; line-height:1.9; }
+
+  /* 节假日列表 */
+  .holi-item { display:flex; align-items:center; gap:8px; padding:8px 10px; background:#FFF6E9; border-radius:10px; margin-bottom:8px; }
+  .holi-item .hn { font-weight:600; font-size:14px; color:#B26A00; }
+  .holi-item .hd { flex:1; font-size:12px; color:#8D6E00; }
+  .holi-item button { background:none; border:none; color:#CCC; font-size:15px; cursor:pointer; padding:2px 6px; }
+  .holi-empty { text-align:center; color:#BBB; font-size:13px; padding:10px 0 14px; }
+
+  /* 弹窗 */
+  .mask { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:flex-end; justify-content:center; z-index:50; }
+  .mask.show { display:flex; }
+  .sheet { background:#fff; width:100%; max-width:560px; border-radius:18px 18px 0 0; padding:18px 18px calc(18px + env(safe-area-inset-bottom)); max-height:85vh; overflow-y:auto; }
+  .sheet h3 { font-size:16px; margin-bottom:2px; }
+  .sheet .cur { font-size:13px; color:#888; margin-bottom:14px; line-height:1.6; }
+  .sheet .cur b { color:#333; }
+  .act-btn { display:block; width:100%; border:none; border-radius:12px; padding:14px; font-size:15px; font-weight:600; margin-bottom:10px; cursor:pointer; }
+  .act-btn.rest { background:#FFEDEE; color:#C62828; }
+  .act-btn.makeup { background:#EAF7EC; color:#2E7D32; }
+  .act-btn.holi { background:#FFF6E9; color:#B26A00; }
+  .act-btn.clear { background:#F2F3F5; color:#888; }
+  .act-btn.save { background:#1F4E79; color:#fff; }
+  .act-btn.cancel { background:none; color:#999; font-weight:400; }
+  .sheet textarea { width:100%; border:1px solid #E3E5E8; border-radius:10px; padding:10px; font-size:14px; font-family:inherit; resize:none; height:64px; margin-bottom:10px; }
+  .sheet input[type=text], .sheet input[type=date] { width:100%; border:1px solid #E3E5E8; border-radius:10px; padding:12px; font-size:14px; margin-bottom:10px; font-family:inherit; background:#fff; }
+  .sheet label { font-size:13px; color:#666; display:block; margin-bottom:4px; }
+
+  #toast { position:fixed; left:50%; bottom:60px; transform:translateX(-50%); background:rgba(0,0,0,.75); color:#fff; font-size:13px; padding:10px 18px; border-radius:20px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:99; white-space:nowrap; max-width:88vw; overflow:hidden; text-overflow:ellipsis; }
+  #toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>阿姨工时管理<small>入职 2026-06-27 · 周一~周六上班</small></h1>
+    <div class="btns">
+      <button class="icon-btn" onclick="openHoli()" title="节假日管理">📅</button>
+      <button class="icon-btn" onclick="openBackup()" title="备份与恢复">💾</button>
+      <button class="icon-btn" onclick="openCfg()" title="Supabase 设置">⚙️</button>
+    </div>
+  </header>
+
+  <div class="cfg-banner" id="cfgBanner">
+    <b>尚未连接 Supabase。</b>点右上角 ⚙️ 填入 Project URL 和 anon key 即可开始使用。
+    还没有项目？到 <a href="https://supabase.com" target="_blank">supabase.com</a> 免费开通，
+    建库 SQL 见网页源码顶部注释（或问启明要）。
+  </div>
+
+  <div class="balance off" id="balanceCard">
+    <div class="b-title">补工结余</div>
+    <div class="b-num" id="balanceNum">—</div>
+    <div class="b-desc" id="balanceDesc">加载中…</div>
+  </div>
+
+  <div class="stats">
+    <div class="stat red"><div class="n" id="statRest">0</div><div class="t">累计外出休息</div></div>
+    <div class="stat green"><div class="n" id="statMakeup">0</div><div class="t">累计已补工</div></div>
+    <div class="stat orange"><div class="n" id="statHoli">0</div><div class="t">法定节假日(天)</div></div>
+  </div>
+
+  <div class="card">
+    <div class="cal-head">
+      <button onclick="changeMonth(-1)">‹ 上月</button>
+      <div class="ym" id="ymLabel"></div>
+      <button onclick="changeMonth(1)">下月 ›</button>
+    </div>
+    <div class="cal-grid" id="calGrid"></div>
+    <div class="month-sum" id="monthSum"></div>
+  </div>
+
+  <details class="rules">
+    <summary>排班规则说明</summary>
+    <ul>
+      <li>阿姨 2026-06-27 入职，每周一~周六上班，周日休息。</li>
+      <li>法定节假日休息，不跟国家调休（调班日照常按"周一至六上班、周日休"执行）。</li>
+      <li>法定节假日由主人手动维护：点右上角 📅，按名称+起止日期录入，每年录一次即可。</li>
+      <li>工作日全家外出 → 点那天记「外出休息」，阿姨欠 1 天补工。</li>
+      <li>之后阿姨周日（或节假日）来补班 → 点那天记「补工」。</li>
+      <li>顶部「补工结余」= 外出休息 − 已补工；&gt;0 阿姨还需补工，&lt;0 阿姨可多休。</li>
+      <li>数据保存在 Supabase 云端，多设备自动同步；⚙️ 配置连接（每台设备配一次），💾 可导出备份。</li>
+    </ul>
+  </details>
+
+  <div class="sec-title">记录明细 <button onclick="exportCSV()">导出 CSV</button></div>
+  <div class="card" id="histCard"><div class="hist-empty">暂无记录</div></div>
+</div>
+
+<!-- 日期操作弹窗 -->
+<div class="mask" id="dayMask">
+  <div class="sheet">
+    <h3 id="mTitle"></h3>
+    <div class="cur" id="mCur"></div>
+    <textarea id="mNote" placeholder="备注（可选）：如 全家去马来西亚旅游 / 周日来补班"></textarea>
+    <div id="mBtns"></div>
+    <button class="act-btn cancel" onclick="closeDayModal()">取消</button>
+  </div>
+</div>
+
+<!-- 节假日管理弹窗 -->
+<div class="mask" id="holiMask">
+  <div class="sheet">
+    <h3>节假日管理</h3>
+    <div class="cur">录入法定节假日（支持跨天范围）。阿姨在节假日休息，不跟调休；每年录一次即可，数据存云端随设备同步。</div>
+    <div id="holiList"></div>
+    <label>名称</label>
+    <input type="text" id="hName" placeholder="如：春节 / 国庆 / 中秋">
+    <label>开始日期</label>
+    <input type="date" id="hStart">
+    <label>结束日期（单日假期与开始日期相同）</label>
+    <input type="date" id="hEnd">
+    <button class="act-btn holi" onclick="addHoliday()">添加节假日</button>
+    <button class="act-btn cancel" onclick="document.getElementById('holiMask').classList.remove('show')">关闭</button>
+  </div>
+</div>
+
+<!-- 备份与恢复弹窗 -->
+<div class="mask" id="bakMask">
+  <div class="sheet">
+    <h3>备份与恢复</h3>
+    <div class="cur">数据存在 Supabase 云端。建议定期导出 JSON 存档；误删数据或迁移项目时可导入恢复（会覆盖云端全部数据）。</div>
+    <button class="act-btn save" onclick="exportJSON()">导出备份（JSON）</button>
+    <button class="act-btn holi" onclick="document.getElementById('impFile').click()">导入恢复（选择 JSON 文件）</button>
+    <input type="file" id="impFile" accept=".json,application/json" style="display:none" onchange="importJSON(this)">
+    <button class="act-btn clear" onclick="wipeAll()">清空全部数据</button>
+    <button class="act-btn cancel" onclick="document.getElementById('bakMask').classList.remove('show')">关闭</button>
+  </div>
+</div>
+
+<!-- Supabase 设置弹窗 -->
+<div class="mask" id="cfgMask">
+  <div class="sheet">
+    <h3>Supabase 连接设置</h3>
+    <div class="cur">在 Supabase 项目的 <b>Project Settings → API</b> 里复制以下两项。配置只保存在本机浏览器，数据存云端。</div>
+    <label>Project URL（形如 https://xxxx.supabase.co）</label>
+    <input type="text" id="cfgUrl" placeholder="https://你的项目.supabase.co">
+    <label>anon public key（eyJ 开头的一长串）</label>
+    <input type="text" id="cfgKey" placeholder="eyJhbGciOi...">
+    <button class="act-btn save" onclick="saveCfg()">保存并连接</button>
+    <button class="act-btn cancel" onclick="document.getElementById('cfgMask').classList.remove('show')">关闭</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ================== 配置区 ================== */
+const HIRE_DATE = '2026-06-27';
+const LS_CFG    = 'ayi_supabase_cfg_v1';
+const T_RECORDS = 'ayi_records';
+const T_HOLIDAYS = 'ayi_holidays';
+
+const TYPE_LABEL = { extra_rest:'外出休息', makeup_work:'补工' };
+const WEEK = ['日','一','二','三','四','五','六'];
+
+/* ================== 初始化 ================== */
+let sb = null;              // Supabase 客户端
+let records = {};           // 'YYYY-MM-DD' -> {type,note}
+let holidays = [];          // [{id,name,start_date,end_date}]
+let cur = new Date();
+let modalDate = null;
+let histLimit = 30;
+let saving = false;
+
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2200);
+}
+
+function fmt(d){
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function addDay(ds){
+  const d = new Date(ds + 'T00:00:00');
+  d.setDate(d.getDate() + 1);
+  return fmt(d);
+}
+function errMsg(e){ return (e && e.message) ? e.message : '网络错误'; }
+
+/* ================== Supabase 连接 ================== */
+function getCfg(){
+  try { return JSON.parse(localStorage.getItem(LS_CFG) || 'null'); }
+  catch(e){ return null; }
+}
+
+function openCfg(){
+  const c = getCfg() || {};
+  document.getElementById('cfgUrl').value = c.url || '';
+  document.getElementById('cfgKey').value = c.key || '';
+  document.getElementById('cfgMask').classList.add('show');
+}
+
+async function saveCfg(){
+  const url = document.getElementById('cfgUrl').value.trim().replace(/\/+$/, '');
+  const key = document.getElementById('cfgKey').value.trim();
+  if (!url || !key){ toast('URL 和 key 都要填'); return; }
+  localStorage.setItem(LS_CFG, JSON.stringify({ url: url, key: key }));
+  document.getElementById('cfgMask').classList.remove('show');
+  toast('连接中…');
+  await initClient();
+}
+
+async function initClient(){
+  const c = getCfg();
+  if (!c || !c.url || !c.key){
+    sb = null; records = {}; holidays = [];
+    renderAll();
+    return;
+  }
+  sb = supabase.createClient(c.url, c.key);
+  await loadAll();
+}
+
+/* ================== 数据读写 ================== */
+async function loadAll(){
+  if (!sb){ records = {}; holidays = []; renderAll(); return; }
+  try {
+    const r1 = await sb.from(T_RECORDS).select('*');
+    if (r1.error) throw r1.error;
+    const r2 = await sb.from(T_HOLIDAYS).select('*');
+    if (r2.error) throw r2.error;
+    records = {};
+    (r1.data || []).forEach(row => { records[row.date] = { type: row.type, note: row.note || '' }; });
+    holidays = (r2.data || []).map(row => ({ id: row.id, name: row.name, start_date: row.start_date, end_date: row.end_date }));
+    holidays.sort((a,b)=> a.start_date < b.start_date ? 1 : -1);
+  } catch(e){
+    records = {}; holidays = [];
+    toast('加载失败：' + errMsg(e) + '（检查 ⚙️ 配置/网络/建表SQL）');
+  }
+  renderAll();
+}
+
+/* ================== 状态计算 ================== */
+function holidayName(ds){
+  for (const h of holidays){
+    if (ds >= h.start_date && ds <= h.end_date) return h.name || '节假日';
+  }
+  return null;
+}
+
+function dayStatus(ds){
+  if (ds < HIRE_DATE) return { key:'prehire', label:'入职前' };
+  const rec = records[ds];
+  const dow = new Date(ds + 'T00:00:00').getDay();
+  if (rec){
+    if (rec.type === 'extra_rest')  return { key:'extra_rest',  label:'外出休息' };
+    if (rec.type === 'makeup_work') return { key:'makeup_work', label:'补工' };
+  }
+  const hn = holidayName(ds);
+  if (hn) return { key:'holiday', label:hn };
+  if (dow === 0) return { key:'sunday', label:'周日休' };
+  return { key:'work', label:'工作日' };
+}
+
+/* ================== 渲染 ================== */
+function renderAll(){
+  renderBanner(); renderBalance(); renderCalendar(); renderHistory();
+}
+
+function renderBanner(){
+  document.getElementById('cfgBanner').style.display = sb ? 'none' : 'block';
+}
+
+function counts(){
+  let rest=0, makeup=0;
+  for (const k in records){
+    if (records[k].type==='extra_rest') rest++;
+    else if (records[k].type==='makeup_work') makeup++;
+  }
+  const set = new Set();
+  holidays.forEach(h => { let d = h.start_date; while (d <= h.end_date){ set.add(d); d = addDay(d); } });
+  return { rest, makeup, holiDays: set.size };
+}
+
+function renderBalance(){
+  const card = document.getElementById('balanceCard');
+  const num = document.getElementById('balanceNum');
+  const desc = document.getElementById('balanceDesc');
+  if (!sb){
+    card.className = 'balance off';
+    num.textContent = '未连接';
+    desc.textContent = '点右上角 ⚙️ 配置 Supabase 后开始使用。';
+    document.getElementById('statRest').textContent = 0;
+    document.getElementById('statMakeup').textContent = 0;
+    document.getElementById('statHoli').textContent = 0;
+    return;
+  }
+  const { rest, makeup, holiDays } = counts();
+  document.getElementById('statRest').textContent = rest;
+  document.getElementById('statMakeup').textContent = makeup;
+  document.getElementById('statHoli').textContent = holiDays;
+  const owed = rest - makeup;
+  if (owed > 0){
+    card.className = 'balance owed';
+    num.textContent = '待补工 ' + owed + ' 天';
+    desc.textContent = '阿姨还有 ' + owed + ' 天外出休息没补回来，可安排在之后的周日补班。';
+  } else if (owed < 0){
+    card.className = 'balance extra';
+    num.textContent = '多补 ' + (-owed) + ' 天';
+    desc.textContent = '阿姨补工已超过外出休息，可让阿姨额外休息 ' + (-owed) + ' 天。';
+  } else {
+    card.className = 'balance clear';
+    num.textContent = '已平衡';
+    desc.textContent = '外出休息与补工刚好相抵，谁也不欠谁。';
+  }
+}
+
+function renderCalendar(){
+  const y = cur.getFullYear(), m = cur.getMonth();
+  document.getElementById('ymLabel').textContent = y + ' 年 ' + (m+1) + ' 月';
+  const grid = document.getElementById('calGrid');
+  grid.innerHTML = '';
+  ['一','二','三','四','五','六','日'].forEach(w=>{
+    const el = document.createElement('div'); el.className='dow'; el.textContent=w; grid.appendChild(el);
+  });
+  const first = new Date(y, m, 1);
+  let lead = first.getDay() - 1; if (lead < 0) lead = 6;   // 周一开头
+  for (let i=0;i<lead;i++){ const el=document.createElement('div'); el.className='day empty'; grid.appendChild(el); }
+  const days = new Date(y, m+1, 0).getDate();
+  const today = fmt(new Date());
+  let mRest=0, mMakeup=0;
+  for (let d=1; d<=days; d++){
+    const ds = fmt(new Date(y, m, d));
+    const st = dayStatus(ds);
+    const el = document.createElement('div');
+    el.className = 'day ' + st.key + (ds===today ? ' today':'') + (records[ds] && records[ds].note ? ' has-note':'');
+    el.innerHTML = '<div class="dnum">' + d + '</div><div class="tag">' + st.label + '</div>';
+    if (st.key !== 'prehire' && st.key !== 'empty') el.onclick = ()=>openDayModal(ds);
+    grid.appendChild(el);
+    if (st.key==='extra_rest') mRest++;
+    if (st.key==='makeup_work') mMakeup++;
+  }
+  document.getElementById('monthSum').textContent =
+    '本月：外出休息 ' + mRest + ' 天 · 补工 ' + mMakeup + ' 天';
+}
+
+function renderHistory(){
+  const card = document.getElementById('histCard');
+  const keys = Object.keys(records).sort().reverse();
+  if (!keys.length){ card.innerHTML = '<div class="hist-empty">暂无记录，点日历上的日期开始登记</div>'; return; }
+  const show = keys.slice(0, histLimit);
+  let html = '';
+  show.forEach(ds=>{
+    const r = records[ds];
+    const wd = WEEK[new Date(ds + 'T00:00:00').getDay()];
+    html += '<div class="hist-item">'
+      + '<div class="hist-badge ' + r.type + '">' + TYPE_LABEL[r.type] + '</div>'
+      + '<div class="hist-body"><div class="hist-date">' + ds + ' 周' + wd + '</div>'
+      + (r.note ? '<div class="hist-note">' + escapeHtml(r.note) + '</div>' : '')
+      + '</div>'
+      + '<button class="hist-del" onclick="delRecord(\'' + ds + '\')" title="删除">✕</button>'
+      + '</div>';
+  });
+  if (keys.length > histLimit){
+    html += '<button class="hist-more" onclick="histLimit+=30;renderHistory()">显示更多（共 ' + keys.length + ' 条）</button>';
+  }
+  card.innerHTML = html;
+}
+
+function renderHoliList(){
+  const box = document.getElementById('holiList');
+  if (!holidays.length){ box.innerHTML = '<div class="holi-empty">还没有录入节假日</div>'; return; }
+  let html = '';
+  holidays.forEach(h=>{
+    html += '<div class="holi-item">'
+      + '<div class="hn">' + escapeHtml(h.name || '节假日') + '</div>'
+      + '<div class="hd">' + h.start_date + (h.end_date > h.start_date ? ' ~ ' + h.end_date : '') + '</div>'
+      + '<button onclick="delHoliday(\'' + h.id + '\')" title="删除">✕</button>'
+      + '</div>';
+  });
+  box.innerHTML = html;
+}
+
+function escapeHtml(s){
+  return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* ================== 交互 ================== */
+function changeMonth(delta){
+  cur = new Date(cur.getFullYear(), cur.getMonth()+delta, 1);
+  renderCalendar();
+}
+
+function needCfg(){
+  if (sb) return false;
+  toast('请先点右上角 ⚙️ 配置 Supabase');
+  return true;
+}
+
+function openDayModal(ds){
+  modalDate = ds;
+  const st = dayStatus(ds);
+  const rec = records[ds];
+  const wd = WEEK[new Date(ds + 'T00:00:00').getDay()];
+  document.getElementById('mTitle').textContent = ds + ' 周' + wd;
+  document.getElementById('mCur').innerHTML = '当前状态：<b>' + st.label + '</b>'
+    + (st.key==='holiday' && !rec ? '（节假日在 📅 节假日管理 中维护）' : '');
+  document.getElementById('mNote').value = rec ? (rec.note || '') : '';
+  const box = document.getElementById('mBtns');
+  let html = '';
+  if (st.key === 'work'){
+    html += '<button class="act-btn rest" onclick="mark(\'extra_rest\')">记「外出休息」· 欠1天补工</button>';
+  } else if (st.key === 'sunday' || (st.key === 'holiday' && !rec)){
+    html += '<button class="act-btn makeup" onclick="mark(\'makeup_work\')">记「补工」· 抵1天外出休息</button>';
+  } else if (rec){
+    if (rec.type !== 'extra_rest')  html += '<button class="act-btn rest" onclick="mark(\'extra_rest\')">改为「外出休息」</button>';
+    if (rec.type !== 'makeup_work') html += '<button class="act-btn makeup" onclick="mark(\'makeup_work\')">改为「补工」</button>';
+    html += '<button class="act-btn save" onclick="saveNote()">仅保存备注</button>';
+    html += '<button class="act-btn clear" onclick="delRecord(modalDate);closeDayModal()">清除这条记录</button>';
+  }
+  box.innerHTML = html;
+  document.getElementById('dayMask').classList.add('show');
+}
+
+function closeDayModal(){ document.getElementById('dayMask').classList.remove('show'); }
+
+async function mark(type){
+  if (needCfg() || saving) return;
+  saving = true;
+  const note = document.getElementById('mNote').value.trim();
+  try {
+    const r = await sb.from(T_RECORDS).upsert({ date: modalDate, type: type, note: note });
+    if (r.error) throw r.error;
+    records[modalDate] = { type: type, note: note };
+    toast('已记「' + TYPE_LABEL[type] + '」');
+    closeDayModal();
+    renderAll();
+  } catch(e){ toast('保存失败：' + errMsg(e)); }
+  saving = false;
+}
+
+async function saveNote(){
+  if (needCfg() || saving || !records[modalDate]) return;
+  saving = true;
+  const note = document.getElementById('mNote').value.trim();
+  try {
+    const r = await sb.from(T_RECORDS).upsert({ date: modalDate, type: records[modalDate].type, note: note });
+    if (r.error) throw r.error;
+    records[modalDate].note = note;
+    toast('备注已保存');
+    closeDayModal();
+    renderAll();
+  } catch(e){ toast('保存失败：' + errMsg(e)); }
+  saving = false;
+}
+
+async function delRecord(ds){
+  if (needCfg()) return;
+  if (!confirm('删除 ' + ds + ' 这条记录？')) return;
+  if (saving) return;
+  saving = true;
+  try {
+    const r = await sb.from(T_RECORDS).delete().eq('date', ds);
+    if (r.error) throw r.error;
+    delete records[ds];
+    toast('已删除');
+    renderAll();
+  } catch(e){ toast('删除失败：' + errMsg(e)); }
+  saving = false;
+}
+
+/* ================== 节假日管理 ================== */
+function openHoli(){
+  renderHoliList();
+  document.getElementById('holiMask').classList.add('show');
+}
+
+async function addHoliday(){
+  if (needCfg() || saving) return;
+  const name = document.getElementById('hName').value.trim() || '节假日';
+  let s = document.getElementById('hStart').value;
+  let e = document.getElementById('hEnd').value || s;
+  if (!s){ toast('请选择开始日期'); return; }
+  if (e < s){ const t = s; s = e; e = t; }
+  const row = { id: 'h' + Date.now() + Math.floor(Math.random()*1000), name: name, start_date: s, end_date: e };
+  saving = true;
+  try {
+    const r = await sb.from(T_HOLIDAYS).insert(row);
+    if (r.error) throw r.error;
+    holidays.push(row);
+    holidays.sort((a,b)=> a.start_date < b.start_date ? 1 : -1);
+    toast('已添加「' + name + '」');
+    document.getElementById('hName').value = '';
+    document.getElementById('hStart').value = '';
+    document.getElementById('hEnd').value = '';
+    renderAll();
+    renderHoliList();
+  } catch(e){ toast('保存失败：' + errMsg(e)); }
+  saving = false;
+}
+
+async function delHoliday(id){
+  if (needCfg()) return;
+  if (!confirm('删除这个节假日？')) return;
+  if (saving) return;
+  saving = true;
+  try {
+    const r = await sb.from(T_HOLIDAYS).delete().eq('id', id);
+    if (r.error) throw r.error;
+    holidays = holidays.filter(h => h.id !== id);
+    toast('已删除');
+    renderAll();
+    renderHoliList();
+  } catch(e){ toast('删除失败：' + errMsg(e)); }
+  saving = false;
+}
+
+/* ================== 备份与恢复 ================== */
+function openBackup(){
+  document.getElementById('bakMask').classList.add('show');
+}
+
+function exportJSON(){
+  const data = {
+    app: 'ayi-work-tracker',
+    version: 1,
+    exported_at: fmt(new Date()),
+    records: records,
+    holidays: holidays
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '阿姨工时备份_' + fmt(new Date()) + '.json';
+  a.click();
+  toast('备份已导出');
+}
+
+function importJSON(input){
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async function(){
+    try {
+      const data = JSON.parse(reader.result);
+      if (!data || typeof data !== 'object' || !data.records || !Array.isArray(data.holidays)){
+        toast('文件格式不对，导入取消'); return;
+      }
+      if (needCfg()) return;
+      if (!confirm('导入将覆盖云端全部数据（记录 ' + Object.keys(data.records).length + ' 条、节假日 ' + data.holidays.length + ' 条），确定？')) return;
+      saving = true;
+      // 先清空云端
+      let r = await sb.from(T_RECORDS).delete().neq('date', '');
+      if (r.error) throw r.error;
+      r = await sb.from(T_HOLIDAYS).delete().neq('id', '');
+      if (r.error) throw r.error;
+      // 再批量写入
+      const recRows = Object.keys(data.records).map(ds => ({
+        date: ds, type: data.records[ds].type, note: data.records[ds].note || ''
+      }));
+      if (recRows.length){
+        r = await sb.from(T_RECORDS).insert(recRows);
+        if (r.error) throw r.error;
+      }
+      const holiRows = data.holidays.map(x => ({
+        id: x.id || ('h' + Date.now() + Math.floor(Math.random()*1000)),
+        name: x.name || '节假日',
+        start_date: x.start_date,
+        end_date: x.end_date || x.start_date
+      }));
+      if (holiRows.length){
+        r = await sb.from(T_HOLIDAYS).insert(holiRows);
+        if (r.error) throw r.error;
+      }
+      saving = false;
+      document.getElementById('bakMask').classList.remove('show');
+      await loadAll();
+      toast('导入完成');
+    } catch(e){
+      saving = false;
+      toast('导入失败：' + errMsg(e));
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
+async function wipeAll(){
+  if (needCfg()) return;
+  if (!confirm('确定清空云端全部记录和节假日？此操作不可恢复，建议先导出备份。')) return;
+  if (!confirm('再确认一次：真的要全部清空吗？')) return;
+  if (saving) return;
+  saving = true;
+  try {
+    let r = await sb.from(T_RECORDS).delete().neq('date', '');
+    if (r.error) throw r.error;
+    r = await sb.from(T_HOLIDAYS).delete().neq('id', '');
+    if (r.error) throw r.error;
+    records = {};
+    holidays = [];
+    saving = false;
+    document.getElementById('bakMask').classList.remove('show');
+    renderAll();
+    toast('已清空');
+  } catch(e){
+    saving = false;
+    toast('清空失败：' + errMsg(e));
+  }
+}
+
+/* ================== CSV 导出 ================== */
+function exportCSV(){
+  const keys = Object.keys(records).sort();
+  if (!keys.length){ toast('没有记录可导出'); return; }
+  let csv = '﻿日期,星期,类型,备注\n';
+  keys.forEach(ds=>{
+    const r = records[ds];
+    const wd = WEEK[new Date(ds + 'T00:00:00').getDay()];
+    csv += ds + ',周' + wd + ',' + TYPE_LABEL[r.type] + ',"' + (r.note||'').replace(/"/g,'""') + '"\n';
+  });
+  const { rest, makeup } = counts();
+  csv += '\n累计外出休息,' + rest + '天\n累计补工,' + makeup + '天\n补工结余,' + (rest-makeup) + '天\n';
+  const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '阿姨工时记录_' + fmt(new Date()) + '.csv';
+  a.click();
+}
+
+/* ================== 启动 ================== */
+initClient();
+</script>
+</body>
+</html>
